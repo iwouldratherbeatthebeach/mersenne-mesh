@@ -13,7 +13,8 @@ export type Health = {
   emailConfigured: boolean;
   databaseBound: boolean;
   schemaReady: boolean;
-  network: "validation";
+  explorationReady?: boolean;
+  network: "validation" | "validation+exploration";
   operatorContact: string | null;
 };
 
@@ -23,4 +24,5 @@ export type ContributionStats = {
   candidates: number;
   factors: number;
   validatedUnits: number;
+  pendingUnits?: number;
 };
