@@ -7,3 +7,9 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "mersenne-mesh"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "db"
+
+# Runtime secrets/variables are intentionally not committed here.
+# Configure AUTH_SECRET, AUTH_GOOGLE_ID, AUTH_GOOGLE_SECRET,
+# AUTH_RESEND_KEY, AUTH_EMAIL_FROM and PUBLIC_CONTACT_EMAIL in Pages settings
+# (or .dev.vars for local development).

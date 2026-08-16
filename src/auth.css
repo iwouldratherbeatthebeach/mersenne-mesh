@@ -1,0 +1,144 @@
+.disabled-link { opacity: .45; pointer-events: none; }
+
+.auth-shell,
+.account-page {
+  width: min(1180px, calc(100% - 48px));
+  margin: 64px auto 110px;
+  position: relative;
+  z-index: 2;
+}
+
+.auth-shell {
+  min-height: 620px;
+  display: grid;
+  place-items: start center;
+  padding-top: 32px;
+}
+
+.compact-auth-shell { min-height: 480px; }
+
+.auth-card {
+  width: min(520px, 100%);
+  padding: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(25,31,35,.97), rgba(12,16,19,.96));
+  box-shadow: 0 30px 90px rgba(0,0,0,.35);
+}
+
+.auth-brand-lockup { display: flex; gap: 16px; align-items: center; }
+.auth-card h1 { margin: 4px 0 0; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.045em; }
+.auth-intro, .auth-card > p { color: var(--muted); line-height: 1.65; }
+
+.auth-tabs {
+  margin: 26px 0 22px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0,0,0,.22);
+}
+.auth-tabs button { border: 0; border-radius: 10px; padding: 11px; color: var(--muted); background: transparent; cursor: pointer; }
+.auth-tabs button.active { color: #0a0d0e; background: var(--lime); font-weight: 750; }
+
+.auth-form { display: grid; gap: 10px; }
+.auth-form label { font-size: 13px; color: var(--muted); font-weight: 700; }
+.auth-form input,
+.account-settings input {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: rgba(0,0,0,.28);
+  color: var(--ink);
+  outline: none;
+}
+.auth-form input:focus,
+.account-settings input:focus { border-color: rgba(184,243,107,.65); box-shadow: 0 0 0 3px rgba(184,243,107,.08); }
+.auth-submit,
+.auth-google,
+.auth-primary-link,
+.account-settings button {
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 13px 16px;
+  font-weight: 760;
+  cursor: pointer;
+}
+.auth-submit,
+.auth-primary-link,
+.account-settings button { background: var(--lime); color: #0a0d0e; }
+.auth-primary-link { display: inline-flex; margin-top: 14px; }
+.auth-submit:disabled,
+.auth-google:disabled { opacity: .45; cursor: not-allowed; }
+.auth-form small,
+.auth-provider-note,
+.auth-fineprint { color: var(--quiet); line-height: 1.5; font-size: 12px; }
+.auth-divider { display: flex; align-items: center; gap: 12px; color: var(--quiet); font-size: 12px; margin: 20px 0; }
+.auth-divider::before,
+.auth-divider::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.auth-google { width: 100%; background: rgba(255,255,255,.96); color: #121416; display: flex; justify-content: center; gap: 10px; align-items: center; }
+.auth-google span { font-weight: 850; color: #4285f4; }
+.auth-error { margin: 0 0 16px; padding: 12px 14px; border: 1px solid rgba(255,181,95,.32); background: rgba(255,181,95,.08); color: #ffd09a; border-radius: 12px; font-size: 13px; }
+
+.account-page { display: grid; gap: 20px; }
+.account-hero { padding: 30px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.account-hero h1 { margin: 4px 0 6px; font-size: clamp(34px, 5vw, 58px); letter-spacing: -.05em; }
+.account-hero p { margin: 0; color: var(--muted); }
+.rank-chip { min-width: 165px; border: 1px solid var(--line); background: rgba(0,0,0,.2); border-radius: 18px; padding: 16px 18px; display: grid; gap: 2px; text-align: right; }
+.rank-chip span, .rank-chip small { color: var(--muted); font-size: 12px; }
+.rank-chip strong { font-size: 30px; color: var(--lime); }
+
+.account-stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.account-stat-grid article { padding: 18px; display: grid; gap: 8px; }
+.account-stat-grid span { color: var(--muted); font-size: 12px; }
+.account-stat-grid strong { font-size: 25px; letter-spacing: -.03em; }
+
+.account-columns { display: grid; grid-template-columns: minmax(270px, .7fr) minmax(0, 1.7fr); gap: 20px; }
+.account-settings,
+.ledger-table-card,
+.audit-card { padding: 24px; }
+.account-settings h2,
+.account-card-heading h2 { margin: 5px 0 18px; }
+.account-settings form { display: flex; gap: 8px; }
+.account-settings button { white-space: nowrap; }
+.account-settings > small { display: block; margin-top: 10px; color: var(--quiet); line-height: 1.5; }
+.settings-status { color: var(--lime); font-size: 13px; }
+.achievement-list { margin-top: 26px; display: flex; flex-wrap: wrap; gap: 8px; }
+.achievement-list .panel-kicker { width: 100%; margin-bottom: 4px; }
+.achievement { padding: 7px 10px; border-radius: 999px; background: rgba(114,169,255,.08); border: 1px solid rgba(114,169,255,.2); color: #a9caff; font-size: 12px; }
+
+.account-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.account-card-heading a,
+.account-card-heading > span { color: var(--lime); font-size: 12px; }
+.ledger-table-wrap { overflow-x: auto; }
+.ledger-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ledger-table th { color: var(--quiet); font-weight: 650; text-align: left; border-bottom: 1px solid var(--line); padding: 9px 10px; }
+.ledger-table td { padding: 13px 10px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.ledger-table td strong { color: var(--ink); display: block; }
+.ledger-table td small { display: block; max-width: 230px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--quiet); }
+.empty-ledger { color: var(--muted); }
+
+.audit-card ol { list-style: none; margin: 0; padding: 0; display: grid; }
+.audit-card li { display: flex; justify-content: space-between; gap: 20px; padding: 12px 0; border-top: 1px solid var(--line); }
+.audit-card li strong { font-size: 13px; }
+.audit-card li span { color: var(--quiet); font-size: 12px; }
+.empty-account { min-height: 520px; }
+
+@media (max-width: 900px) {
+  .account-stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .account-columns { grid-template-columns: 1fr; }
+  .account-hero { align-items: flex-start; flex-direction: column; }
+  .rank-chip { text-align: left; }
+}
+
+@media (max-width: 640px) {
+  .auth-shell,
+  .account-page { width: min(100% - 28px, 1180px); margin-top: 30px; }
+  .auth-card { padding: 24px; }
+  .account-stat-grid { grid-template-columns: 1fr 1fr; }
+  .account-settings form { flex-direction: column; }
+  .audit-card li { flex-direction: column; gap: 4px; }
+}

@@ -10,48 +10,35 @@ const env = {
     fetch: async (request) => {
       const path = new URL(request.url).pathname;
       return path === "/index.html"
-        ? new Response("<!doctype html><title>Mersenne Mesh</title>", {
-            headers: { "content-type": "text/html" },
-          })
+        ? new Response("<!doctype html><title>Mersenne Mesh</title>", { headers: { "content-type": "text/html" } })
         : new Response("Not found", { status: 404 });
     },
   },
 };
 
 test("reports an unconfigured local environment safely", async () => {
-  const response = await worker.fetch(
-    new Request("https://mesh.example/api/health"),
-    env,
-    {},
-  );
+  const response = await worker.fetch(new Request("https://mesh.example/api/health"), env, {});
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     ok: true,
     authConfigured: false,
+    googleConfigured: false,
+    emailConfigured: false,
     databaseBound: false,
+    schemaReady: false,
     network: "validation",
     operatorContact: null,
   });
 });
 
-test("returns a null session until Google OAuth is configured", async () => {
-  const response = await worker.fetch(
-    new Request("https://mesh.example/api/auth/session"),
-    env,
-    {},
-  );
+test("returns a null session until authentication is configured", async () => {
+  const response = await worker.fetch(new Request("https://mesh.example/api/auth/session"), env, {});
   assert.equal(response.status, 200);
   assert.equal(await response.json(), null);
 });
 
 test("serves the single-page app for a human-facing route", async () => {
-  const response = await worker.fetch(
-    new Request("https://mesh.example/about", {
-      headers: { accept: "text/html" },
-    }),
-    env,
-    {},
-  );
+  const response = await worker.fetch(new Request("https://mesh.example/login", { headers: { accept: "text/html" } }), env, {});
   assert.equal(response.status, 200);
   assert.match(await response.text(), /Mersenne Mesh/);
 });
