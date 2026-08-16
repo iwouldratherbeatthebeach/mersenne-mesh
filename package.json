@@ -1,0 +1,31 @@
+{
+  "name": "mersenne-mesh-cloudflare-pages",
+  "version": "1.0.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && vite build --config worker/vite.config.ts && node scripts/package-worker.mjs",
+    "preview": "npm run build && wrangler pages dev dist",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run build && node --test tests/worker-smoke.mjs"
+  },
+  "dependencies": {
+    "@auth/core": "0.41.3",
+    "@auth/d1-adapter": "1.11.3",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@cloudflare/workers-types": "4.20260702.1",
+    "@vitejs/plugin-react": "6.0.2",
+    "typescript": "5.9.3",
+    "vite": "8.0.13",
+    "wrangler": "4.92.0"
+  }
+}
