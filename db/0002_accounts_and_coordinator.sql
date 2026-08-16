@@ -1,3 +1,4 @@
+#hi mom
 DROP TABLE IF EXISTS contributions;
 DROP TABLE IF EXISTS profiles;
 
