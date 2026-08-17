@@ -405,7 +405,7 @@ async function leaseApi(request: Request, env: Env) {
      ORDER BY l.created_at DESC LIMIT 1`,
   ).bind(user.id).first<WorkUnitRow>();
   if (existing) {
-    const effectiveEngine: "cpu" | "gpu" = existing.network === "exploration" ? "cpu" : engine;
+    const effectiveEngine: "cpu" | "gpu" = engine;
     if (existing.leasedEngine !== effectiveEngine) {
       await env.DB.prepare(`UPDATE work_leases SET engine = ? WHERE id = ?`).bind(effectiveEngine, existing.leaseId).run();
       existing.leasedEngine = effectiveEngine;
@@ -420,7 +420,7 @@ async function leaseApi(request: Request, env: Env) {
 
   const leaseId = crypto.randomUUID();
   const extraWhere = explorationReady
-    ? `AND w.confirmed_at IS NULL AND (w.network = 'validation' OR ? = 'cpu')`
+    ? `AND w.confirmed_at IS NULL`
     : ``;
   const orderBy = explorationReady
     ? `CASE WHEN w.network = 'validation' THEN 0 ELSE 1 END, w.exponent ASC, w.start_k ASC`
@@ -444,17 +444,9 @@ async function leaseApi(request: Request, env: Env) {
 
   try {
     const statement = env.DB.prepare(sql);
-    const inserted = explorationReady
-      ? await statement.bind(leaseId, user.id, engine, engine, user.id).run()
-      : await statement.bind(leaseId, user.id, engine, user.id).run();
+    const inserted = await statement.bind(leaseId, user.id, engine, user.id).run();
     if (!inserted.meta.changes) {
-      return Response.json({
-        job: null,
-        message: engine === "gpu" && explorationReady
-          ? "No GPU-safe work is available; CPU frontier work may be available."
-          : "No work is currently available.",
-        cpuFallbackAvailable: engine === "gpu" && explorationReady,
-      });
+      return Response.json({ job: null, message: "No work is currently available." });
     }
   } catch (error) {
     const retryExisting = await env.DB.prepare(
@@ -647,7 +639,7 @@ async function contributionsApi(request: Request, env: Env) {
         .map(String).sort(compareFactorStrings);
       resultValid = JSON.stringify(receivedFactors) === JSON.stringify(expectedFactors);
     } else {
-      resultValid = engine === "cpu" && verifyReportedFactors(lease, receivedFactors);
+      resultValid = verifyReportedFactors(lease, receivedFactors);
     }
   }
 

@@ -72,9 +72,9 @@ function AboutPage() {
 }
 
 const questions = [
-  ["What does the site calculate?", "It performs trial factoring for Mersenne numbers 2^p − 1. The coordinator first serves known-answer validation work, then CPU BigInt frontier ranges using large prime exponents."],
+  ["What does the site calculate?", "It performs trial factoring for Mersenne numbers 2^p − 1. The coordinator first serves known-answer validation work, then frontier ranges using CPU BigInt or a WebGPU wide-integer kernel built from 32-bit limbs."],
   ["Can this version discover a new Mersenne prime?", "Not by itself yet. A factor immediately proves a candidate composite, but a no-factor trial-factoring result is only one preprocessing step. A large Mersenne prime requires a full PRP/Lucas–Lehmer primality test and independent confirmation."],
-  ["Why does frontier work use CPU instead of my GPU?", "The current WebGPU trial-factor kernel uses 32-bit integer arithmetic, which is safe for the small validation ranges but would overflow on the high-exponent frontier. The CPU worker uses BigInt and is the reference path until a wide-integer WebGPU kernel is added."],
+  ["Can frontier work use my GPU?", "Yes. Frontier WebGPU represents candidate factors as two 32-bit limbs and performs modular arithmetic explicitly across those limbs. Automatic mode may fall back to CPU BigInt if WebGPU fails; explicit GPU mode stops instead of silently using CPU."],
   ["Do I have to keep pressing Start?", "No. After one explicit Start click, the page continuously requests the next lease. If the queue is temporarily empty or the coordinator is unavailable, it stays in a waiting state and retries automatically until you pause or close the tab."],
   ["How are frontier results trusted?", "The server verifies every reported factor mathematically. A no-factor range is stored as pending and becomes verified only after an independent contributor returns the same result. Disagreements remain visible in the audit trail."],
   ["Does this duplicate GIMPS work?", "It can. Mersenne Mesh is currently independent and does not reserve assignments from PrimeNet. The initial frontier was chosen using GIMPS public progress data, but individual exponents may be assigned or completed by GIMPS concurrently. Direct coordination is a future integration step."],

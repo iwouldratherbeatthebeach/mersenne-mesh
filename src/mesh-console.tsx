@@ -149,41 +149,162 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }`;
 }
 
-async function runGpuJob(job: WorkJob) {
-  if ((job.network ?? "validation") === "exploration") {
-    throw new Error("Frontier ranges require the 64-bit CPU path in this release.");
+function frontierTrialFactorShader() {
+  return /* wgsl */ `
+struct Params { exponent: u32, start_k: u32, count: u32, max_hits: u32, }
+struct U64 { lo: u32, hi: u32, }
+struct Results { hit_count: atomic<u32>, tested_count: atomic<u32>, factors: array<U64, 64>, }
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read_write> results: Results;
+
+fn u64_zero() -> U64 { return U64(0u, 0u); }
+fn u64_from_u32(value: u32) -> U64 { return U64(value, 0u); }
+fn u64_is_zero(value: U64) -> bool { return value.lo == 0u && value.hi == 0u; }
+fn u64_eq(a: U64, b: U64) -> bool { return a.lo == b.lo && a.hi == b.hi; }
+fn u64_lt(a: U64, b: U64) -> bool {
+  return a.hi < b.hi || (a.hi == b.hi && a.lo < b.lo);
+}
+fn u64_ge(a: U64, b: U64) -> bool { return !u64_lt(a, b); }
+fn u64_add(a: U64, b: U64) -> U64 {
+  let lo = a.lo + b.lo;
+  let carry = select(0u, 1u, lo < a.lo);
+  return U64(lo, a.hi + b.hi + carry);
+}
+fn u64_sub(a: U64, b: U64) -> U64 {
+  let borrow = select(0u, 1u, a.lo < b.lo);
+  return U64(a.lo - b.lo, a.hi - b.hi - borrow);
+}
+fn u64_shl1(value: U64) -> U64 {
+  return U64(value.lo << 1u, (value.hi << 1u) | (value.lo >> 31u));
+}
+fn u64_shr1(value: U64) -> U64 {
+  return U64((value.lo >> 1u) | (value.hi << 31u), value.hi >> 1u);
+}
+fn u64_mul_u32(a: u32, b: u32) -> U64 {
+  var left = u64_from_u32(a);
+  var right = b;
+  var result = u64_zero();
+  loop {
+    if (right == 0u) { break; }
+    if ((right & 1u) == 1u) { result = u64_add(result, left); }
+    right = right >> 1u;
+    if (right != 0u) { left = u64_shl1(left); }
   }
+  return result;
+}
+fn add_mod(a: U64, b: U64, modulus: U64) -> U64 {
+  let remaining = u64_sub(modulus, b);
+  if (u64_ge(a, remaining)) { return u64_sub(a, remaining); }
+  return u64_add(a, b);
+}
+fn mul_mod(left_value: U64, right_value: U64, modulus: U64) -> U64 {
+  var left = left_value;
+  var right = right_value;
+  var result = u64_zero();
+  loop {
+    if (u64_is_zero(right)) { break; }
+    if ((right.lo & 1u) == 1u) { result = add_mod(result, left, modulus); }
+    right = u64_shr1(right);
+    if (!u64_is_zero(right)) { left = add_mod(left, left, modulus); }
+  }
+  return result;
+}
+fn pow_mod_two(exponent: u32, modulus: U64) -> U64 {
+  var value = u64_from_u32(2u);
+  var power = exponent;
+  var result = u64_from_u32(1u);
+  loop {
+    if (power == 0u) { break; }
+    if ((power & 1u) == 1u) { result = mul_mod(result, value, modulus); }
+    power = power >> 1u;
+    if (power != 0u) { value = mul_mod(value, value, modulus); }
+  }
+  return result;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.count) { return; }
+  let k = params.start_k + id.x;
+  var q = u64_mul_u32(k, params.exponent);
+  q = u64_shl1(q);
+  q = u64_add(q, u64_from_u32(1u));
+  let residue8 = q.lo & 7u;
+  if (residue8 != 1u && residue8 != 7u) { return; }
+  atomicAdd(&results.tested_count, 1u);
+  if (u64_eq(pow_mod_two(params.exponent, q), u64_from_u32(1u))) {
+    let slot = atomicAdd(&results.hit_count, 1u);
+    if (slot < params.max_hits) { results.factors[slot] = q; }
+  }
+}`;
+}
+
+function limbsToDecimal(lo: number, hi: number) {
+  return ((BigInt(hi) << 32n) | BigInt(lo)).toString();
+}
+
+async function runGpuJob(job: WorkJob, onProgress?: (fraction: number) => void) {
   if (!navigator.gpu) throw new Error("WebGPU is unavailable");
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("No compatible GPU adapter was found");
   const device = await adapter.requestDevice();
-  const params = new Uint32Array([job.exponent, job.startK, job.count, 64]);
-  const resultByteLength = 8 + 64 * Uint32Array.BYTES_PER_ELEMENT;
+  const frontier = (job.network ?? "validation") === "exploration";
+  const maxHits = 64;
+  const wordsPerFactor = frontier ? 2 : 1;
+  const resultWords = 2 + maxHits * wordsPerFactor;
+  const resultByteLength = resultWords * Uint32Array.BYTES_PER_ELEMENT;
+  const workgroupSize = frontier ? 256 : 128;
+  // Frontier kernels are intentionally sliced to avoid one very long GPU dispatch.
+  const chunkSize = frontier ? 262_144 : job.count;
   const paramsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const resultBuffer = device.createBuffer({ size: resultByteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const readBuffer = device.createBuffer({ size: resultByteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  device.queue.writeBuffer(paramsBuffer, 0, params);
-  device.queue.writeBuffer(resultBuffer, 0, new Uint32Array(resultByteLength / 4));
-  const shaderModule = device.createShaderModule({ code: trialFactorShader() });
+  const shaderModule = device.createShaderModule({ code: frontier ? frontierTrialFactorShader() : trialFactorShader() });
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: shaderModule, entryPoint: "main" } });
-  const bindGroup = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: paramsBuffer } }, { binding: 1, resource: { buffer: resultBuffer } }] });
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: paramsBuffer } }, { binding: 1, resource: { buffer: resultBuffer } }],
+  });
   const startedAt = performance.now();
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
-  pass.setPipeline(pipeline);
-  pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(Math.ceil(job.count / 128));
-  pass.end();
-  encoder.copyBufferToBuffer(resultBuffer, 0, readBuffer, 0, resultByteLength);
-  device.queue.submit([encoder.finish()]);
-  await readBuffer.mapAsync(GPUMapMode.READ);
-  const values = new Uint32Array(readBuffer.getMappedRange().slice(0));
-  const hitCount = Math.min(values[0], 64);
-  const tested = values[1];
-  const factors = Array.from(values.slice(2, 2 + hitCount)).map(String);
-  readBuffer.unmap();
+  let tested = 0;
+  const factors = new Set<string>();
+  let processed = 0;
+
+  while (processed < job.count) {
+    const count = Math.min(chunkSize, job.count - processed);
+    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([job.exponent, job.startK + processed, count, maxHits]));
+    device.queue.writeBuffer(resultBuffer, 0, new Uint32Array(resultWords));
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(count / workgroupSize));
+    pass.end();
+    encoder.copyBufferToBuffer(resultBuffer, 0, readBuffer, 0, resultByteLength);
+    device.queue.submit([encoder.finish()]);
+    await readBuffer.mapAsync(GPUMapMode.READ);
+    const values = new Uint32Array(readBuffer.getMappedRange().slice(0));
+    const rawHitCount = values[0];
+    if (rawHitCount > maxHits) {
+      readBuffer.unmap();
+      throw new Error("GPU factor buffer overflow; retry this lease on CPU.");
+    }
+    tested += values[1];
+    if (frontier) {
+      for (let index = 0; index < rawHitCount; index += 1) {
+        factors.add(limbsToDecimal(values[2 + index * 2], values[3 + index * 2]));
+      }
+    } else {
+      for (let index = 0; index < rawHitCount; index += 1) factors.add(String(values[2 + index]));
+    }
+    readBuffer.unmap();
+    processed += count;
+    onProgress?.(processed / job.count);
+    if (frontier && processed < job.count) await sleep(0);
+  }
+
   paramsBuffer.destroy(); resultBuffer.destroy(); readBuffer.destroy();
-  return { elapsedMs: performance.now() - startedAt, candidates: tested, factors };
+  return { elapsedMs: performance.now() - startedAt, candidates: tested, factors: [...factors].sort(compareFactorStrings) };
 }
 
 function runCpuJob(job: WorkJob, cores: number, workerPool: React.MutableRefObject<Worker[]>) {
@@ -230,9 +351,9 @@ async function requestLease(engine: ActiveEngine) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ engine }),
   });
-  const body = (await response.json()) as { job?: WorkJob | null; error?: string; message?: string; cpuFallbackAvailable?: boolean };
+  const body = (await response.json()) as { job?: WorkJob | null; error?: string; message?: string };
   if (!response.ok) throw new Error(body.error || "Unable to lease work from the coordinator.");
-  return { job: body.job ?? null, message: body.message, cpuFallbackAvailable: body.cpuFallbackAvailable };
+  return { job: body.job ?? null, message: body.message };
 }
 
 export default function MeshConsole({ user, signInPath }: { user: Viewer | null; signInPath: string }) {
@@ -325,7 +446,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
   }
 
   function selectedEngine(): ActiveEngine {
-    if (mode === "gpu" && webGpuAvailable) return "gpu";
+    if (mode === "gpu") return "gpu";
     if (mode === "auto" && webGpuAvailable) return "gpu";
     return "cpu";
   }
@@ -337,18 +458,17 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
       return { job, engine: requestedEngine };
     }
 
-    const first = await requestLease(requestedEngine);
-    if (first.job) return { job: first.job, engine: first.job.leasedEngine ?? requestedEngine };
-
-    if (requestedEngine === "gpu" && first.cpuFallbackAvailable) {
-      const cpu = await requestLease("cpu");
-      if (cpu.job) return { job: cpu.job, engine: cpu.job.leasedEngine ?? "cpu" };
-    }
+    const lease = await requestLease(requestedEngine);
+    if (lease.job) return { job: lease.job, engine: lease.job.leasedEngine ?? requestedEngine };
     return { job: null, engine: requestedEngine };
   }
 
   async function startContributing() {
     if (runningRef.current) return;
+    if (mode === "gpu" && !webGpuAvailable) {
+      setStatusMessage("GPU mode is selected, but WebGPU is not currently available in this browser.");
+      return;
+    }
     runningRef.current = true;
     waitingAnnouncedRef.current = false;
     setIsRunning(true);
@@ -387,7 +507,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
       waitingAnnouncedRef.current = false;
       setIsWaiting(false);
       const network = job.network ?? "validation";
-      const engine = network === "exploration" ? "cpu" : requestedEngine;
+      const engine = job.leasedEngine ?? requestedEngine;
       setActiveEngine(engine);
       setCurrentNetwork(network);
       setCurrentExponent(job.exponent);
@@ -395,13 +515,13 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
       setProgress(8);
       setStatusMessage(
         network === "exploration"
-          ? `CPU frontier screening M${job.exponent} · ${formatCount(job.count)} k-values`
+          ? `${engine.toUpperCase()} frontier screening M${job.exponent} · ${formatCount(job.count)} k-values`
           : `${engine.toUpperCase()} validating M${job.exponent} · ${formatCount(job.count)} k-values`,
       );
 
       try {
         const outcome = engine === "gpu"
-          ? { ...(await runGpuJob(job)), canceled: false }
+          ? { ...(await runGpuJob(job, (fraction) => setProgress(Math.max(8, Math.round(8 + fraction * 90))))), canceled: false }
           : await runCpuJob(job, cores, workersRef);
         if (outcome.canceled || !runningRef.current) break;
         setProgress(100);
@@ -453,10 +573,15 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
         const message = error instanceof Error ? error.message : "Compute engine error";
         if (engine === "gpu") {
           setWebGpuAvailable(false);
-          setMode("cpu");
-          setStatusMessage(`GPU unavailable (${message}); switched to CPU`);
-          addActivity({ tone: "blue", title: "Automatic CPU fallback", detail: "The existing lease will retry on the CPU path." });
-          continue;
+          if (mode === "auto") {
+            setStatusMessage(`GPU unavailable (${message}); Automatic mode will continue on CPU`);
+            addActivity({ tone: "blue", title: "Automatic CPU fallback", detail: "Automatic mode will request the next lease on CPU." });
+            continue;
+          }
+          setStatusMessage(`GPU mode stopped: ${message}`);
+          addActivity({ tone: "amber", title: "GPU contribution stopped", detail: "GPU mode does not silently fall back to CPU. Choose Automatic or CPU to continue." });
+          runningRef.current = false;
+          break;
         }
         setStatusMessage(message);
         runningRef.current = false;
@@ -484,7 +609,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
         <div className="eyebrow"><span>01</span> Open distributed mathematics</div>
         <h1>Put spare compute<br /><em>toward discovery.</em></h1>
         <p>A browser-native volunteer network for Mersenne-number research. Validate the engine, screen frontier ranges, and keep durable credit for every server-recorded calculation.</p>
-        <div className="hero-metrics" aria-label="Mesh capabilities"><div><strong>CPU</strong><span>BigInt workers</span></div><div><strong>GPU</strong><span>Validation WebGPU</span></div><div><strong>Lease</strong><span>Continuous coordination</span></div></div>
+        <div className="hero-metrics" aria-label="Mesh capabilities"><div><strong>CPU</strong><span>BigInt workers</span></div><div><strong>GPU</strong><span>64-bit limb WebGPU</span></div><div><strong>Lease</strong><span>Continuous coordination</span></div></div>
       </section>
 
       <section className="console-grid" aria-label="Contribution console">
@@ -493,7 +618,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
           <div className="engine-tabs" role="group" aria-label="Compute engine">
             {(["auto", "cpu", "gpu"] as EngineMode[]).map((engine) => <button key={engine} className={mode === engine ? "selected" : ""} onClick={() => setMode(engine)} disabled={isRunning || (engine === "gpu" && !webGpuAvailable)}>{engine === "auto" ? "Automatic" : engine.toUpperCase()}{engine === "gpu" && !webGpuAvailable && <small>Unavailable</small>}</button>)}
           </div>
-          <div className="capability-row"><span><i className="good" /> Continuous leases</span><span><i className={webGpuAvailable ? "good" : "muted"} /> {webGpuAvailable ? "WebGPU validation" : "CPU available"}</span><span><i className="good" /> Frontier CPU BigInt</span></div>
+          <div className="capability-row"><span><i className="good" /> Continuous leases</span><span><i className={webGpuAvailable ? "good" : "muted"} /> {webGpuAvailable ? "Frontier WebGPU" : "CPU available"}</span><span><i className="good" /> Server factor verification</span></div>
           <div className="control-stack">
             <label><span><b>CPU workers</b><output>{cores} of {availableCores}</output></span><input type="range" min="1" max={availableCores} value={cores} disabled={isRunning} onChange={(event) => setCores(Number(event.target.value))} style={{ "--range-progress": `${((cores - 1) / Math.max(1, availableCores - 1)) * 100}%` } as React.CSSProperties} /></label>
             <label><span><b>Compute intensity</b><output>{intensity}%</output></span><input type="range" min="25" max="100" step="5" value={intensity} onChange={(event) => setIntensity(Number(event.target.value))} style={{ "--range-progress": `${intensity}%` } as React.CSSProperties} /></label>
@@ -505,7 +630,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
             <div className="progress-track"><span style={{ width: `${progress}%` }} /></div><p>{statusMessage}</p>
           </div>
           <button className={`compute-button ${isRunning ? "stop" : ""}`} onClick={isRunning ? pauseContributing : startContributing}><span className="button-icon" aria-hidden="true">{isRunning ? "Ⅱ" : "▶"}</span>{isRunning ? "Pause contribution" : "Start contributing"}</button>
-          <p className="consent-note">One click keeps requesting work until you pause or close this tab. Frontier ranges currently use CPU BigInt; WebGPU remains enabled for 32-bit-safe validation work.</p>
+          <p className="consent-note">One click keeps requesting work until you pause or close this tab. GPU mode now runs frontier ranges with explicit 64-bit limb arithmetic; Automatic may fall back to CPU, while GPU mode never silently does.</p>
         </article>
 
         <aside className="dashboard-column">
