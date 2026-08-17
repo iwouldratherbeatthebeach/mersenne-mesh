@@ -32,6 +32,8 @@ type ContributionResult = {
 type ContributionResponse = {
   stats?: ContributionStats;
   error?: string;
+  code?: string;
+  details?: Record<string, unknown>;
   network?: WorkNetwork;
   pendingVerification?: boolean;
   confirmed?: boolean;
@@ -101,6 +103,82 @@ function compareFactorStrings(a: string, b: string) {
     return left < right ? -1 : left > right ? 1 : 0;
   } catch {
     return a.localeCompare(b);
+  }
+}
+
+function powModBigInt(base: bigint, exponent: bigint, modulus: bigint) {
+  let value = base % modulus;
+  let power = exponent;
+  let result = 1n;
+  while (power > 0n) {
+    if ((power & 1n) === 1n) result = (result * value) % modulus;
+    power >>= 1n;
+    if (power > 0n) value = (value * value) % modulus;
+  }
+  return result;
+}
+
+function verifyGpuOutcomeLocally(
+  job: WorkJob,
+  outcome: { candidates: number; factors: string[] },
+) {
+  if (
+    typeof job.expectedCandidates === "number" &&
+    outcome.candidates !== job.expectedCandidates
+  ) {
+    throw new Error(
+      `GPU candidate-count self-check failed: expected ${job.expectedCandidates.toLocaleString()}, got ${outcome.candidates.toLocaleString()}.`,
+    );
+  }
+
+  if ((job.network ?? "validation") !== "exploration") return;
+
+  const p = BigInt(job.exponent);
+  const start = BigInt(job.startK);
+  const end = start + BigInt(job.count);
+  const divisor = 2n * p;
+
+  for (const factorText of outcome.factors) {
+    const q = BigInt(factorText);
+    if (q <= 1n || (q - 1n) % divisor !== 0n) {
+      throw new Error(`GPU factor self-check failed for q=${factorText}: invalid 2kp+1 form.`);
+    }
+    const k = (q - 1n) / divisor;
+    if (k < start || k >= end) {
+      throw new Error(`GPU factor self-check failed for q=${factorText}: factor lies outside this lease.`);
+    }
+    const residue8 = q & 7n;
+    if (residue8 !== 1n && residue8 !== 7n) {
+      throw new Error(`GPU factor self-check failed for q=${factorText}: q mod 8 is invalid.`);
+    }
+    if (powModBigInt(2n, p, q) !== 1n) {
+      throw new Error(`GPU factor self-check failed for q=${factorText}: modular verification failed.`);
+    }
+  }
+}
+
+const GPU_SELF_TEST_JOB: WorkJob = {
+  workUnitId: "gpu-self-test-m141308467-k1149365",
+  network: "exploration",
+  exponent: 141_308_467,
+  startK: 1_149_365,
+  count: 1,
+  expectedCandidates: 1,
+};
+
+const GPU_SELF_TEST_FACTOR = "324830012346911";
+
+async function runGpuSelfTest() {
+  const result = await runGpuJob(GPU_SELF_TEST_JOB);
+  verifyGpuOutcomeLocally(GPU_SELF_TEST_JOB, result);
+  if (
+    result.candidates !== 1 ||
+    result.factors.length !== 1 ||
+    result.factors[0] !== GPU_SELF_TEST_FACTOR
+  ) {
+    throw new Error(
+      `Frontier WebGPU self-test failed: expected q=${GPU_SELF_TEST_FACTOR}, got ${result.factors.join(", ") || "no factor"}.`,
+    );
   }
 }
 
@@ -377,6 +455,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
   const workersRef = useRef<Worker[]>([]);
   const jobIndexRef = useRef(0);
   const waitingAnnouncedRef = useRef(false);
+  const gpuSelfTestPassedRef = useRef(false);
 
   const displayStats = user ? accountStats : sessionStats;
   const publicHandle = useMemo(() => user?.publicHandle ?? "guest-contributor", [user]);
@@ -436,7 +515,10 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
         body: JSON.stringify({ ...result, cores: coreCount }),
       });
       const data = (await response.json()) as ContributionResponse;
-      if (!response.ok) throw new Error(data.error || "The server rejected this result.");
+      if (!response.ok) {
+        const suffix = data.code ? ` [${data.code}]` : "";
+        throw new Error(`${data.error || "The server rejected this result."}${suffix}`);
+      }
       if (data.stats) setAccountStats(data.stats);
       return { accepted: true, response: data };
     } catch (error) {
@@ -469,6 +551,39 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
       setStatusMessage("GPU mode is selected, but WebGPU is not currently available in this browser.");
       return;
     }
+
+    if (selectedEngine() === "gpu" && !gpuSelfTestPassedRef.current) {
+      setStatusMessage("Running a known-factor WebGPU self-test before frontier work…");
+      try {
+        await runGpuSelfTest();
+        gpuSelfTestPassedRef.current = true;
+        addActivity({
+          tone: "lime",
+          title: "Frontier WebGPU self-test passed",
+          detail: `Known 49-bit factor q = ${GPU_SELF_TEST_FACTOR} reproduced exactly on this GPU.`,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Frontier WebGPU self-test failed.";
+        if (mode === "auto") {
+          setWebGpuAvailable(false);
+          setStatusMessage(`${message} Automatic mode will use CPU BigInt instead.`);
+          addActivity({
+            tone: "amber",
+            title: "WebGPU self-test failed",
+            detail: "Automatic mode disabled GPU frontier work for this page and will use CPU BigInt.",
+          });
+        } else {
+          setStatusMessage(message);
+          addActivity({
+            tone: "amber",
+            title: "WebGPU self-test failed",
+            detail: "GPU mode stopped before requesting or submitting frontier work.",
+          });
+          return;
+        }
+      }
+    }
+
     runningRef.current = true;
     waitingAnnouncedRef.current = false;
     setIsRunning(true);
@@ -524,6 +639,7 @@ export default function MeshConsole({ user, signInPath }: { user: Viewer | null;
           ? { ...(await runGpuJob(job, (fraction) => setProgress(Math.max(8, Math.round(8 + fraction * 90))))), canceled: false }
           : await runCpuJob(job, cores, workersRef);
         if (outcome.canceled || !runningRef.current) break;
+        if (engine === "gpu") verifyGpuOutcomeLocally(job, outcome);
         setProgress(100);
 
         const result: ContributionResult = {

@@ -621,36 +621,90 @@ async function contributionsApi(request: Request, env: Env) {
      WHERE l.id = ? AND l.user_id = ?`,
   ).bind(leaseId, user.id).first<WorkUnitRow>();
 
-  const commonValid = Boolean(
-    lease &&
-      lease.status === "leased" &&
-      Date.parse(`${lease.expiresAt.replace(" ", "T")}Z`) > Date.now() &&
-      lease.workUnitId === workUnitId &&
-      lease.exponent === exponent &&
-      lease.leasedEngine === engine &&
-      Number.isFinite(elapsedMs) && elapsedMs >= 1 && elapsedMs <= MAX_ELAPSED_MS &&
-      candidates === lease.expectedCandidates,
-  );
+  let rejection:
+    | { code: string; error: string; details?: Record<string, unknown> }
+    | null = null;
 
-  let resultValid = commonValid;
-  if (resultValid && lease) {
-    if (lease.network === "validation") {
-      const expectedFactors = (JSON.parse(lease.expectedFactorsJson || "[]") as string[])
-        .map(String).sort(compareFactorStrings);
-      resultValid = JSON.stringify(receivedFactors) === JSON.stringify(expectedFactors);
-    } else {
-      resultValid = verifyReportedFactors(lease, receivedFactors);
+  if (!lease) {
+    rejection = {
+      code: "lease_not_found",
+      error: "The server could not find this lease for the signed-in contributor.",
+      details: { leaseId, workUnitId },
+    };
+  } else if (lease.status !== "leased") {
+    rejection = {
+      code: "lease_not_active",
+      error: `This lease is no longer active (status: ${lease.status}).`,
+      details: { leaseStatus: lease.status },
+    };
+  } else if (Date.parse(`${lease.expiresAt.replace(" ", "T")}Z`) <= Date.now()) {
+    rejection = {
+      code: "lease_expired",
+      error: "The work finished after its server lease expired.",
+      details: { expiresAt: lease.expiresAt },
+    };
+  } else if (lease.workUnitId !== workUnitId) {
+    rejection = {
+      code: "work_unit_mismatch",
+      error: "The submitted work-unit ID does not match the active lease.",
+      details: { expected: lease.workUnitId, received: workUnitId },
+    };
+  } else if (lease.exponent !== exponent) {
+    rejection = {
+      code: "exponent_mismatch",
+      error: "The submitted exponent does not match the active lease.",
+      details: { expected: lease.exponent, received: exponent },
+    };
+  } else if (lease.leasedEngine !== engine) {
+    rejection = {
+      code: "engine_mismatch",
+      error: `The active lease expects ${lease.leasedEngine.toUpperCase()}, but the result was submitted as ${engine.toUpperCase()}.`,
+      details: { expected: lease.leasedEngine, received: engine },
+    };
+  } else if (!Number.isFinite(elapsedMs) || elapsedMs < 1 || elapsedMs > MAX_ELAPSED_MS) {
+    rejection = {
+      code: "elapsed_time_invalid",
+      error: "The reported compute duration is outside the accepted range.",
+      details: { elapsedMs, maxElapsedMs: MAX_ELAPSED_MS },
+    };
+  } else if (candidates !== lease.expectedCandidates) {
+    rejection = {
+      code: "candidate_count_mismatch",
+      error: `Candidate count mismatch: expected ${lease.expectedCandidates}, received ${candidates}.`,
+      details: { expected: lease.expectedCandidates, received: candidates },
+    };
+  } else if (lease.network === "validation") {
+    const expectedFactors = (JSON.parse(lease.expectedFactorsJson || "[]") as string[])
+      .map(String).sort(compareFactorStrings);
+    if (JSON.stringify(receivedFactors) !== JSON.stringify(expectedFactors)) {
+      rejection = {
+        code: "known_answer_mismatch",
+        error: "The validation result did not reproduce the server's known factor set.",
+        details: { expectedFactors, receivedFactors },
+      };
     }
+  } else if (!verifyReportedFactors(lease, receivedFactors)) {
+    rejection = {
+      code: "reported_factor_invalid",
+      error: "At least one GPU/CPU-reported factor failed the server's BigInt verification.",
+      details: { receivedFactors },
+    };
   }
 
-  if (!resultValid || !lease) {
+  if (rejection) {
     await audit(env, "contribution.rejected", user.id, {
       leaseId,
       workUnitId,
       network: lease?.network ?? "unknown",
-      reason: "validation_mismatch",
+      reason: rejection.code,
+      details: rejection.details ?? {},
     });
-    return Response.json({ error: "The result did not match the active server lease." }, { status: 422 });
+    return Response.json(rejection, { status: 422 });
+  }
+
+  // The rejection checks above guarantee a live lease here.
+  if (!lease) {
+    return Response.json({ code: "lease_not_found", error: "Lease not found." }, { status: 422 });
   }
 
   const canonicalFactors = JSON.stringify(receivedFactors);
@@ -727,6 +781,7 @@ async function healthApi(env: Env) {
     schemaReady,
     explorationReady,
     network: explorationReady ? "validation+exploration" : "validation",
+    computeProtocol: "gpu-frontier-v2",
     operatorContact: env.PUBLIC_CONTACT_EMAIL || null,
   });
 }
