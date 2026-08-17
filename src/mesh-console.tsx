@@ -335,7 +335,7 @@ async function runGpuJob(job: WorkJob, onProgress?: (fraction: number) => void) 
   // Frontier kernels are intentionally sliced to avoid one very long GPU dispatch.
   const chunkSize = frontier ? 262_144 : job.count;
   const paramsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  const resultBuffer = device.createBuffer({ size: resultByteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const resultBuffer = device.createBuffer({ size: resultByteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
   const readBuffer = device.createBuffer({ size: resultByteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const shaderModule = device.createShaderModule({ code: frontier ? frontierTrialFactorShader() : trialFactorShader() });
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: shaderModule, entryPoint: "main" } });
@@ -351,8 +351,8 @@ async function runGpuJob(job: WorkJob, onProgress?: (fraction: number) => void) 
   while (processed < job.count) {
     const count = Math.min(chunkSize, job.count - processed);
     device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([job.exponent, job.startK + processed, count, maxHits]));
-    device.queue.writeBuffer(resultBuffer, 0, new Uint32Array(resultWords));
     const encoder = device.createCommandEncoder();
+    encoder.clearBuffer(resultBuffer);
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
