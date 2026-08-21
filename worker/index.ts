@@ -9,6 +9,13 @@ interface Env {
   AUTH_SECRET?: string;
   AUTH_GOOGLE_ID?: string;
   AUTH_GOOGLE_SECRET?: string;
+  // Opt-in only. Auth.js labels this "dangerous" because it auto-merges a Google
+  // sign-in into an existing account that shares the same email address without
+  // an extra confirmation step. Google verifies email ownership, so the residual
+  // risk is low, but it is still a deliberate trade-off an operator should choose
+  // rather than inherit as a silent default. Unset or any value other than
+  // "true" keeps linking disabled.
+  AUTH_GOOGLE_ALLOW_ACCOUNT_LINKING?: string;
   AUTH_RESEND_KEY?: string;
   AUTH_EMAIL_FROM?: string;
   PUBLIC_CONTACT_EMAIL?: string;
@@ -56,7 +63,24 @@ type WorkUnitRow = {
 
 const HANDLE_RE = /^[a-z0-9_-]{3,32}$/;
 const MAX_ELAPSED_MS = 3_600_000;
-const EXPLORATION_MATCHES_REQUIRED = 2;
+const EXPLORATION_MATCHES_REQUIRED = 3;
+
+// Fixed-window rate limits. These are intentionally generous relative to how
+// long a real work unit takes to compute, so honest continuous-mode clients
+// never notice them; they exist to add friction and an audit trail against
+// scripted lease/submission farming, not to be a precise abuse fence.
+const RATE_LIMIT_WINDOW_SECONDS = 300;
+const LEASE_RATE_LIMIT_PER_WINDOW = 40;
+const CONTRIBUTION_RATE_LIMIT_PER_WINDOW = 60;
+
+// Soft plausibility ceiling for self-reported throughput. Candidates-per-ms is
+// generous on purpose (well above realistic BigInt/WebGPU trial-factoring
+// throughput on consumer hardware) so legitimate fast machines are never
+// rejected. Submissions above the ceiling are still accepted (the factor math
+// is independently verified regardless), but are flagged in the audit log so
+// an operator can review credit-farming patterns.
+const MAX_PLAUSIBLE_CANDIDATES_PER_MS_PER_CPU_CORE = 50;
+const MAX_PLAUSIBLE_CANDIDATES_PER_MS_GPU = 2_000;
 
 async function schemaV2Ready(env: Env) {
   if (!env.DB) return false;
@@ -128,6 +152,31 @@ async function audit(
   }
 }
 
+// Best-effort fixed-window rate limiter backed by D1. Fails open (allows the
+// request) if the rate_limits table is missing — e.g. before db/0004 has been
+// applied — so a pending migration never bricks the coordinator.
+async function checkRateLimit(env: Env, key: string, limit: number) {
+  if (!env.DB) return true;
+  const windowStart = Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW_SECONDS) * RATE_LIMIT_WINDOW_SECONDS;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO rate_limits (rl_key, window_start, count) VALUES (?, ?, 1)
+       ON CONFLICT (rl_key, window_start) DO UPDATE SET count = count + 1`,
+    ).bind(key, windowStart).run();
+    const row = await env.DB.prepare(
+      `SELECT count FROM rate_limits WHERE rl_key = ? AND window_start = ?`,
+    ).bind(key, windowStart).first<{ count: number }>();
+    return (row?.count ?? 0) <= limit;
+  } catch (error) {
+    console.error({
+      event: "rate_limit.check_failed",
+      key,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
+
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
@@ -186,7 +235,7 @@ function authConfig(env: Env): AuthConfig {
       Google({
         clientId: env.AUTH_GOOGLE_ID!,
         clientSecret: env.AUTH_GOOGLE_SECRET!,
-        allowDangerousEmailAccountLinking: true,
+        allowDangerousEmailAccountLinking: env.AUTH_GOOGLE_ALLOW_ACCOUNT_LINKING === "true",
       }),
     );
   }
@@ -238,6 +287,26 @@ function secure(response: Response) {
   headers.set("x-frame-options", "DENY");
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
   headers.set("cross-origin-opener-policy", "same-origin-allow-popups");
+  // The SPA ships no inline/external scripts and no external fonts or images;
+  // inline `style` attributes (used for range-input/progress-bar fills) are the
+  // only reason style-src needs 'unsafe-inline'. Tighten this further only
+  // after confirming the frontend build hasn't started using external assets.
+  headers.set(
+    "content-security-policy",
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "worker-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+  );
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -386,6 +455,12 @@ async function leaseApi(request: Request, env: Env) {
   if (!user?.id || !user.email) {
     return Response.json({ error: "Sign in required for server-leased work." }, { status: 401 });
   }
+
+  if (!(await checkRateLimit(env, `lease:${user.id}`, LEASE_RATE_LIMIT_PER_WINDOW))) {
+    await audit(env, "work.lease_rate_limited", user.id, {});
+    return Response.json({ error: "Too many lease requests. Please slow down and try again shortly." }, { status: 429 });
+  }
+
   await ensureProfile(env, user);
 
   let body: { engine?: string } = {};
@@ -602,6 +677,11 @@ async function contributionsApi(request: Request, env: Env) {
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST" } });
   }
 
+  if (!(await checkRateLimit(env, `contribute:${user.id}`, CONTRIBUTION_RATE_LIMIT_PER_WINDOW))) {
+    await audit(env, "contribution.rate_limited", user.id, {});
+    return Response.json({ error: "Too many submissions. Please slow down and try again shortly." }, { status: 429 });
+  }
+
   let payload: ContributionPayload;
   try { payload = (await request.json()) as ContributionPayload; }
   catch { return Response.json({ error: "Invalid JSON." }, { status: 400 }); }
@@ -705,6 +785,25 @@ async function contributionsApi(request: Request, env: Env) {
   // The rejection checks above guarantee a live lease here.
   if (!lease) {
     return Response.json({ code: "lease_not_found", error: "Lease not found." }, { status: 422 });
+  }
+
+  // Soft plausibility check: does the reported duration make sense for the
+  // reported candidate count? This never blocks a submission — the factor
+  // math above is the real integrity guarantee — but it gives operators an
+  // audit trail for likely fabricated compute-time / credit farming.
+  const maxPlausibleCandidates = engine === "gpu"
+    ? elapsedMs * MAX_PLAUSIBLE_CANDIDATES_PER_MS_GPU
+    : elapsedMs * MAX_PLAUSIBLE_CANDIDATES_PER_MS_PER_CPU_CORE * cores;
+  if (candidates > maxPlausibleCandidates) {
+    await audit(env, "contribution.suspicious_throughput", user.id, {
+      leaseId,
+      workUnitId,
+      engine,
+      cores,
+      elapsedMs,
+      candidates,
+      maxPlausibleCandidates,
+    });
   }
 
   const canonicalFactors = JSON.stringify(receivedFactors);
